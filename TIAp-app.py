@@ -769,9 +769,9 @@ if not st.session_state.authenticated:
         st.markdown(
             """
             <div style="text-align:center; margin-top:1.5rem;">
-              <h2>TIAP – Thermal Image Analyzer</h2>
+              <h2>TIAp – Thermal Image Analyzer</h2>
               <p style="color:#888; font-size:0.9rem;">
-                Revashi iPhone IR photos · protected demo
+                By We are dougalien
               </p>
             </div>
             """,
@@ -830,9 +830,9 @@ with top_row[0]:
     st.markdown(
         """
         <div class="tiap-header">
-          <h1>TIAP – Thermal Image Analyzer</h1>
+          <h1>TIAp – Thermal Image Analyzer</h1>
           <div class="tiap-subtitle">
-            Revashi iPhone IR photos → quick triage with three AI models.
+            By We are dougalien.
           </div>
         </div>
         """,
@@ -860,7 +860,7 @@ if missing:
 st.write("### 1. Thermal image")
 
 uploaded = st.file_uploader(
-    "Upload a thermal or regular image (Revashi iPhone adapter compatible)",
+    "Upload a thermal image",
     type=["png", "jpg", "jpeg", "webp"],
     accept_multiple_files=False,
 )
