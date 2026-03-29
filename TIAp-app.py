@@ -122,31 +122,31 @@ st.markdown(
     """
     <style>
     .stApp {
-        background: linear-gradient(180deg, #140914 0%, #230D2B 32%, #41123A 55%, #6E1E31 76%, #A33B1F 90%, #D08D26 100%);
-        color: #F6F4F7;
+        background: linear-gradient(180deg, #F7F9FC 0%, #EEF2F7 100%);
+        color: #1F2933;
     }
     [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #120812 0%, #220C24 100%);
+        background: linear-gradient(180deg, #F1F5F9 0%, #E2E8F0 100%);
     }
     .main-card {
-        background: rgba(18, 12, 24, 0.78);
-        border: 1px solid rgba(255, 191, 73, 0.26);
+        background: rgba(255, 255, 255, 0.92);
+        border: 1px solid #D0D7E2;
         border-radius: 18px;
         padding: 1rem 1.2rem;
-        box-shadow: 0 10px 28px rgba(0,0,0,0.24);
+        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
         margin-bottom: 1rem;
     }
     .answer-box {
-        background: rgba(255, 245, 214, 0.96);
-        color: #241616;
-        border-left: 6px solid #FFC24B;
+        background: #F8FAFC;
+        color: #1F2933;
+        border-left: 6px solid #E4572E;
         border-radius: 12px;
         padding: 1rem;
     }
     .next-box {
-        background: rgba(255, 224, 210, 0.95);
-        color: #241616;
-        border-left: 6px solid #FF6B4A;
+        background: #FFF7ED;
+        color: #1F2933;
+        border-left: 6px solid #F59E0B;
         border-radius: 12px;
         padding: 0.9rem;
     }
@@ -155,29 +155,31 @@ st.markdown(
         font-weight: 700;
         text-transform: uppercase;
         letter-spacing: 0.04em;
-        color: #F1D58A;
+        color: #5B6570;
         margin-bottom: 0.4rem;
     }
     .chat-user {
-        background: rgba(255,255,255,0.09);
-        border: 1px solid rgba(255,255,255,0.12);
+        background: #EAF2F8;
+        color: #1F2933;
+        border: 1px solid #B8C7D9;
         border-radius: 12px;
         padding: 0.75rem;
         margin: 0.45rem 0;
     }
     .chat-ai {
-        background: rgba(255, 194, 75, 0.13);
-        border: 1px solid rgba(255, 194, 75, 0.18);
+        background: #F8FAFC;
+        color: #1F2933;
+        border: 1px solid #D0D7E2;
         border-radius: 12px;
         padding: 0.75rem;
         margin: 0.45rem 0;
     }
     .small-note {
         font-size: 0.92rem;
-        color: #F9E6B7;
+        color: #5B6570;
     }
     div[data-testid="stMetricValue"] {
-        color: #FFF3B8;
+        color: #1F2933;
     }
     </style>
     """,
