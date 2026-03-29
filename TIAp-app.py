@@ -58,6 +58,8 @@ COUNSEL_MODES = {
 
 def init_state():
     defaults = {
+        "authenticated": False,
+        "login_error": "",
         "started": False,
         "image_name": None,
         "image_bytes": None,
@@ -78,7 +80,7 @@ def init_state():
         "student_observations": "",
         "student_best_answer": "",
         "known_name": "",
-        "student_name": "",  # now: main subject (stream, person, device, etc.)
+        "student_name": "",  # main subject (stream, person, device, etc.)
         "include_auto_zoom": True,
         "zoom_fraction": 0.5,
         "clear_followup_next": False,
@@ -100,16 +102,40 @@ def get_secret_or_env(name: str, default: str = ""):
     return os.getenv(name, default)
 
 
+def app_password():
+    # APP_PASSWORD from secrets or env
+    return get_secret_or_env("APP_PASSWORD", "")
+
+
 def get_openai_key():
     return get_secret_or_env("OPENAI_API_KEY", "")
 
 
 def get_claude_key():
-    return get_secret_or_env("CLAUDE_API_KEY", get_secret_or_env("ANTHROPIC_API_KEY", ""))
+    return get_secret_or_env(
+        "CLAUDE_API_KEY",
+        get_secret_or_env("ANTHROPIC_API_KEY", ""),
+    )
 
 
 def get_perplexity_key():
     return get_secret_or_env("PERPLEXITY_API_KEY", "")
+
+
+def sign_out():
+    keep = {
+        "counsel_mode": st.session_state.get("counsel_mode", "Balanced"),
+        "mode": st.session_state.get("mode", "Auto"),
+        "openai_model": st.session_state.get("openai_model", DEFAULT_OPENAI_MODEL),
+        "claude_model": st.session_state.get("claude_model", DEFAULT_CLAUDE_MODEL),
+        "perplexity_model": st.session_state.get("perplexity_model", DEFAULT_PERPLEXITY_MODEL),
+    }
+    for k in list(st.session_state.keys()):
+        del st.session_state[k]
+    init_state()
+    for k, v in keep.items():
+        st.session_state[k] = v
+    st.session_state.authenticated = False
 
 
 def file_to_data_uri(uploaded_file):
@@ -730,11 +756,44 @@ def send_followup(user_text: str):
 
 
 # =========================================================
-# TIAP – Thermal Image Analyzer main UI
+# TIAP – UI with password gate
 # =========================================================
 
 init_state()
 ensure_image_data_uri()
+
+# --- Password screen ---
+if not st.session_state.authenticated:
+    left, center, right = st.columns([1, 1.4, 1])
+    with center:
+        st.markdown(
+            """
+            <div style="text-align:center; margin-top:1.5rem;">
+              <h2>TIAP – Thermal Image Analyzer</h2>
+              <p style="color:#888; font-size:0.9rem;">
+                Revashi iPhone IR photos · protected demo
+              </p>
+            </div>
+            """,
+            unsafe_allow_html=True,
+        )
+
+        password = st.text_input("App password", type="password")
+        if st.button("Enter TIAP"):
+            expected = app_password()
+            if expected and password == expected:
+                st.session_state.authenticated = True
+                st.session_state.login_error = ""
+            else:
+                st.session_state.login_error = "Incorrect password. Check with the owner."
+
+        if st.session_state.login_error:
+            st.error(st.session_state.login_error)
+
+        st.caption("Password is set via `APP_PASSWORD` in `.streamlit/secrets.toml`.")
+    st.stop()
+
+# --- Main TIAP UI ---
 
 st.markdown(
     """
@@ -766,17 +825,23 @@ st.markdown(
     unsafe_allow_html=True,
 )
 
-st.markdown(
-    """
-    <div class="tiap-header">
-      <h1>TIAP – Thermal Image Analyzer</h1>
-      <div class="tiap-subtitle">
-        Revashi iPhone IR photos → quick triage with three AI models.
-      </div>
-    </div>
-    """,
-    unsafe_allow_html=True,
-)
+top_row = st.columns([4, 1])
+with top_row[0]:
+    st.markdown(
+        """
+        <div class="tiap-header">
+          <h1>TIAP – Thermal Image Analyzer</h1>
+          <div class="tiap-subtitle">
+            Revashi iPhone IR photos → quick triage with three AI models.
+          </div>
+        </div>
+        """,
+        unsafe_allow_html=True,
+    )
+with top_row[1]:
+    if st.button("Sign out"):
+        sign_out()
+        st.experimental_rerun()
 
 missing = []
 if not get_openai_key():
