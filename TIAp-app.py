@@ -1,217 +1,126 @@
-import os
-import json
-import base64
-import mimetypes
-from io import BytesIO
-from datetime import datetime
-
-import requests
 import streamlit as st
+import requests
+import base64
+import json
 from PIL import Image
+from io import BytesIO
+import html
+import mimetypes
 
 # =========================================================
-# TIAp — Thermal Image Analyzer
-# Refactored with login, Free/Pro tiers, IR theme, zoom,
-# cleaner answer UI, follow-up chat, and session download.
+# CONFIG
 # =========================================================
 
-st.set_page_config(
-    page_title="TIAp – Thermal Image Analyzer",
-    page_icon="🌡️",
-    layout="wide",
-)
+OPENAI_MODEL = "gpt-4o"
 
-OPENAI_URL = "https://api.openai.com/v1/chat/completions"
-PERPLEXITY_URL = "https://api.perplexity.ai/chat/completions"
-ANTHROPIC_URL = "https://api.anthropic.com/v1/messages"
+# =========================================================
+# PROMPTS
+# =========================================================
 
-DEFAULT_OPENAI_MODEL = "gpt-4.1-mini"
-DEFAULT_CLAUDE_MODEL = "claude-sonnet-4-6"
-DEFAULT_PERPLEXITY_MODEL = "sonar-pro"
+SYSTEM = """
+You are a thermal image analysis assistant.
 
-# ---------------------------------------------------------
-# State
-# ---------------------------------------------------------
+Rules:
+- Only use visible thermal patterns and plain context clues.
+- If unsure, say "not observable".
+- Be concise.
+- Do not invent precise temperatures, hidden causes, diagnoses, or certainty that the image does not support.
+- Stay grounded in relative hot and cool areas, shapes, gradients, and visible structure.
+"""
+
+OBSERVER = SYSTEM + """
+Return JSON:
+{
+  "visible_evidence": ["", "", ""],
+  "likely_identification": "",
+  "alternative_identification": "",
+  "confidence": 1,
+  "reasoning": "",
+  "next": ""
+}
+"""
+
+LESSON_PROMPT = """
+Create a short lesson plan based on this thermal image analysis.
+
+Image label: {label}
+Visible evidence: {evidence}
+Likely identification: {likely}
+Alternative identification: {alternative}
+Reasoning: {reasoning}
+
+Include:
+- Learning objective
+- Activity
+- Assessment question
+- Time estimate
+"""
+
+# =========================================================
+# STATE
+# =========================================================
 
 def init_state():
     defaults = {
         "authenticated": False,
         "login_error": "",
-        "image_name": None,
-        "image_bytes": None,
-        "image_mime": None,
-        "image_data_uri": None,
-        "display_messages": [],
-        "analysis_meta": {},
-        "final_reply": "",
-        "observer_json": None,
-        "validator_json": None,
-        "judge_json": None,
-        "tier": "Free",
-        "context_notes": "",
+        "username": "",
         "specimen_label": "",
         "student_observations": "",
         "student_best_answer": "",
         "known_name": "",
-        "student_name": "",
-        "include_auto_zoom": True,
-        "zoom_fraction": 0.5,
+        "context_notes": "",
+        "obs": None,
+        "lesson_plan": None,
+        "uploaded_name": None,
+        "image_bytes": None,
+        "image_mime": None,
+        "image_data_uri": None,
         "show_zoom_preview": True,
-        "openai_model": DEFAULT_OPENAI_MODEL,
-        "claude_model": DEFAULT_CLAUDE_MODEL,
-        "perplexity_model": DEFAULT_PERPLEXITY_MODEL,
-        "session_log": [],
+        "zoom_fraction": 0.5,
     }
     for k, v in defaults.items():
         if k not in st.session_state:
             st.session_state[k] = v
 
+init_state()
 
-def reset_analysis_state():
-    st.session_state.final_reply = ""
-    st.session_state.observer_json = None
-    st.session_state.validator_json = None
-    st.session_state.judge_json = None
-    st.session_state.display_messages = []
-    st.session_state.analysis_meta = {}
+# =========================================================
+# HELPERS
+# =========================================================
 
-
-def get_secret_or_env(name: str, default: str = ""):
+def get_secret(name: str, default: str = "") -> str:
     try:
-        if name in st.secrets:
-            return st.secrets[name]
+        return st.secrets.get(name, default)
     except Exception:
-        pass
-    return os.getenv(name, default)
+        return default
 
+def get_app_password() -> str:
+    return get_secret("APP_PASSWORD", "")
 
-def app_password():
-    return get_secret_or_env("APP_PASSWORD", "")
+def encode_image(file) -> str:
+    return base64.b64encode(file.getvalue()).decode()
 
+def display_name() -> str:
+    name = st.session_state.username.strip()
+    return name if name else "Friend"
 
-def get_openai_key():
-    return get_secret_or_env("OPENAI_API_KEY", "")
-
-
-def get_claude_key():
-    return get_secret_or_env("CLAUDE_API_KEY", get_secret_or_env("ANTHROPIC_API_KEY", ""))
-
-
-def get_perplexity_key():
-    return get_secret_or_env("PERPLEXITY_API_KEY", "")
-
-
-def sign_out():
-    keep = {
-        "openai_model": st.session_state.get("openai_model", DEFAULT_OPENAI_MODEL),
-        "claude_model": st.session_state.get("claude_model", DEFAULT_CLAUDE_MODEL),
-        "perplexity_model": st.session_state.get("perplexity_model", DEFAULT_PERPLEXITY_MODEL),
-    }
-    for k in list(st.session_state.keys()):
-        del st.session_state[k]
-    init_state()
-    for k, v in keep.items():
-        st.session_state[k] = v
-    st.session_state.authenticated = False
-
-# ---------------------------------------------------------
-# Styling
-# ---------------------------------------------------------
-
-st.markdown(
-    """
-    <style>
-    .stApp {
-        background: linear-gradient(180deg, #F7F9FC 0%, #EEF2F7 100%);
-        color: #1F2933;
-    }
-    [data-testid="stSidebar"] {
-        background: linear-gradient(180deg, #F1F5F9 0%, #E2E8F0 100%);
-    }
-    .main-card {
-        background: rgba(255, 255, 255, 0.92);
-        border: 1px solid #D0D7E2;
-        border-radius: 18px;
-        padding: 1rem 1.2rem;
-        box-shadow: 0 6px 18px rgba(15, 23, 42, 0.08);
-        margin-bottom: 1rem;
-    }
-    .answer-box {
-        background: #F8FAFC;
-        color: #1F2933;
-        border-left: 6px solid #E4572E;
-        border-radius: 12px;
-        padding: 1rem;
-    }
-    .next-box {
-        background: #FFF7ED;
-        color: #1F2933;
-        border-left: 6px solid #F59E0B;
-        border-radius: 12px;
-        padding: 0.9rem;
-    }
-    .soft-label {
-        font-size: 0.84rem;
-        font-weight: 700;
-        text-transform: uppercase;
-        letter-spacing: 0.04em;
-        color: #5B6570;
-        margin-bottom: 0.4rem;
-    }
-    .chat-user {
-        background: #EAF2F8;
-        color: #1F2933;
-        border: 1px solid #B8C7D9;
-        border-radius: 12px;
-        padding: 0.75rem;
-        margin: 0.45rem 0;
-    }
-    .chat-ai {
-        background: #F8FAFC;
-        color: #1F2933;
-        border: 1px solid #D0D7E2;
-        border-radius: 12px;
-        padding: 0.75rem;
-        margin: 0.45rem 0;
-    }
-    .small-note {
-        font-size: 0.92rem;
-        color: #5B6570;
-    }
-    div[data-testid="stMetricValue"] {
-        color: #1F2933;
-    }
-    </style>
-    """,
-    unsafe_allow_html=True,
-)
-
-# ---------------------------------------------------------
-# Image helpers
-# ---------------------------------------------------------
+def parse_observation(raw: str):
+    try:
+        return json.loads(raw)
+    except Exception:
+        return None
 
 def file_to_data_uri(uploaded_file):
     raw = uploaded_file.getvalue()
     mime = uploaded_file.type or mimetypes.guess_type(uploaded_file.name)[0] or "image/png"
     b64 = base64.b64encode(raw).decode("utf-8")
-    data_uri = f"data:{mime};base64,{b64}"
-    return raw, mime, data_uri
-
-
-def update_uploaded_image(uploaded_file):
-    raw, mime, data_uri = file_to_data_uri(uploaded_file)
-    st.session_state.image_name = uploaded_file.name
-    st.session_state.image_bytes = raw
-    st.session_state.image_mime = mime
-    st.session_state.image_data_uri = data_uri
-    reset_analysis_state()
-
+    return raw, mime, f"data:{mime};base64,{b64}"
 
 def pil_from_session_image():
     if not st.session_state.image_bytes:
         return None
     return Image.open(BytesIO(st.session_state.image_bytes))
-
 
 def center_crop(img: Image.Image, frac: float):
     w, h = img.size
@@ -222,7 +131,6 @@ def center_crop(img: Image.Image, frac: float):
     right = left + cw
     bottom = top + ch
     return img.crop((left, top, right, bottom))
-
 
 def build_data_uri_from_pil(img: Image.Image):
     buf = BytesIO()
@@ -237,6 +145,29 @@ def build_data_uri_from_pil(img: Image.Image):
     }.get(fmt, "image/png")
     return f"data:{mime};base64,{base64.b64encode(raw).decode('utf-8')}"
 
+def build_context_block() -> str:
+    label = st.session_state.specimen_label.strip() or "[not provided]"
+    user_name = display_name()
+    observations = st.session_state.student_observations.strip() or "[none entered]"
+    guess = st.session_state.student_best_answer.strip() or "[none entered]"
+    known = st.session_state.known_name.strip() or "[none provided]"
+    notes = st.session_state.context_notes.strip() or "[none provided]"
+
+    return f"""
+Image label: {label}
+User name: {user_name}
+User observations: {observations}
+User current guess: {guess}
+Known identification: {known}
+Extra notes: {notes}
+""".strip()
+
+def build_observer_prompt() -> str:
+    return OBSERVER + f"""
+
+Use this plain context if helpful:
+{build_context_block()}
+"""
 
 def get_image_contents_for_openai():
     if not st.session_state.image_data_uri:
@@ -244,603 +175,504 @@ def get_image_contents_for_openai():
 
     contents = [{"type": "image_url", "image_url": {"url": st.session_state.image_data_uri}}]
 
-    if st.session_state.tier == "Pro" and st.session_state.include_auto_zoom and st.session_state.image_bytes:
-        try:
+    try:
+        if st.session_state.image_bytes:
             img = pil_from_session_image()
             crop = center_crop(img, st.session_state.zoom_fraction)
             contents.append({"type": "image_url", "image_url": {"url": build_data_uri_from_pil(crop)}})
-        except Exception:
-            pass
-    return contents
-
-
-def get_image_blocks_for_anthropic():
-    if not st.session_state.image_bytes:
-        return []
-
-    blocks = []
-    mime = st.session_state.get("image_mime") or "image/png"
-    media_type = mime if mime in ["image/jpeg", "image/png", "image/webp", "image/gif"] else "image/png"
-    source_data = base64.b64encode(st.session_state.image_bytes).decode("utf-8")
-    blocks.append({
-        "type": "image",
-        "source": {"type": "base64", "media_type": media_type, "data": source_data},
-    })
-
-    if st.session_state.tier == "Pro" and st.session_state.include_auto_zoom:
-        try:
-            img = pil_from_session_image()
-            crop = center_crop(img, st.session_state.zoom_fraction)
-            buf = BytesIO()
-            crop.save(buf, format="PNG")
-            blocks.append({
-                "type": "image",
-                "source": {
-                    "type": "base64",
-                    "media_type": "image/png",
-                    "data": base64.b64encode(buf.getvalue()).decode("utf-8"),
-                },
-            })
-        except Exception:
-            pass
-    return blocks
-
-# ---------------------------------------------------------
-# Prompting
-# ---------------------------------------------------------
-
-def specimen_context_block():
-    label = st.session_state.specimen_label.strip() or "[no label]"
-    notes = st.session_state.context_notes.strip() or "[no extra notes]"
-    target = st.session_state.student_name.strip() or "[no main subject provided]"
-    observations = st.session_state.student_observations.strip() or "[none entered yet]"
-    best_answer = st.session_state.student_best_answer.strip() or "[none entered yet]"
-    known_name = st.session_state.known_name.strip() or "[none provided]"
-
-    return f"""
-    Photo label / ID: {label}
-    Main subject (user input): {target}
-    User observations: {observations}
-    User current guess: {best_answer}
-    Known diagnosis / ground truth (optional): {known_name}
-    Extra notes: {notes}
-    """.strip()
-
-
-def role_system_prompt(role: str):
-    base = """
-    You are helping analyze a single thermal / infrared image.
-    Stay grounded in what the image can actually support: visible patterns, relative hot/cold areas,
-    shapes, gradients, and plain context clues.
-    Do not invent precise temperatures, hidden causes, diagnoses, or certainty that the image does not support.
-    Be concise, careful, and honest.
-    """.strip()
-
-    if role == "observer":
-        return f"""
-        {base}
-        You are the OBSERVER.
-
-        Return valid JSON only with this schema:
-        {{
-          "visible_evidence": ["short item", "short item", "short item"],
-          "likely_identification": "short phrase",
-          "alternative_identification": "short phrase",
-          "confidence": 1,
-          "image_clarity": "clear / somewhat unclear / poor",
-          "reasoning": "1-2 short sentences",
-          "next_check": "short practical next check"
-        }}
-        """.strip()
-
-    if role == "validator":
-        return f"""
-        {base}
-        You are the VALIDATOR.
-
-        Return valid JSON only with this schema:
-        {{
-          "visible_evidence": ["short item", "short item", "short item"],
-          "likely_identification": "short phrase",
-          "alternative_identification": "short phrase",
-          "confidence": 1,
-          "agreement_with_student_name": "probably right / close / not a good match / uncertain",
-          "reasoning": "1-2 short sentences",
-          "next_check": "short practical next check"
-        }}
-        """.strip()
-
-    return f"""
-    {base}
-    You are the JUDGE.
-
-    Return valid JSON only with this schema:
-    {{
-      "agreement_level": "high / medium / low",
-      "winner": "observer / validator / blended",
-      "final_identification": "short phrase",
-      "confidence": 1,
-      "why": "1-2 short sentences",
-      "next_check": "short practical next check",
-      "student_reply": "2-4 short sentences, plain language, concise, user-facing"
-    }}
-    """.strip()
-
-# ---------------------------------------------------------
-# API helpers
-# ---------------------------------------------------------
-
-def safe_json_loads(text: str):
-    text = text.strip()
-    try:
-        return json.loads(text)
     except Exception:
         pass
-    start = text.find("{")
-    end = text.rfind("}")
-    if start != -1 and end != -1 and end > start:
-        try:
-            return json.loads(text[start:end + 1])
-        except Exception:
-            return None
-    return None
 
+    return contents
 
-def call_openai_json(system_prompt: str, user_text: str):
-    api_key = get_openai_key()
-    if not api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY.")
+def call_openai_json(prompt: str) -> str:
+    key = get_secret("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError("Missing OPENAI_API_KEY in Streamlit secrets.")
 
     payload = {
-        "model": st.session_state.openai_model,
+        "model": OPENAI_MODEL,
         "temperature": 0.2,
         "response_format": {"type": "json_object"},
         "messages": [
-            {"role": "system", "content": system_prompt},
+            {"role": "system", "content": prompt},
             {
                 "role": "user",
-                "content": [{"type": "text", "text": user_text}, *get_image_contents_for_openai()],
-            },
-        ],
+                "content": [{"type": "text", "text": "Analyze this thermal image."}, *get_image_contents_for_openai()]
+            }
+        ]
     }
 
-    resp = requests.post(
-        OPENAI_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=120,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"OpenAI error {resp.status_code}: {resp.text[:1000]}")
-
-    text = resp.json()["choices"][0]["message"]["content"]
-    parsed = safe_json_loads(text)
-    if parsed is None:
-        raise RuntimeError("OpenAI returned non-JSON output.")
-    return parsed
-
-
-def call_claude_json(system_prompt: str, user_text: str):
-    api_key = get_claude_key()
-    if not api_key:
-        raise RuntimeError("Missing CLAUDE_API_KEY or ANTHROPIC_API_KEY.")
-
-    payload = {
-        "model": st.session_state.claude_model,
-        "max_tokens": 900,
-        "temperature": 0.2,
-        "system": system_prompt,
-        "messages": [{"role": "user", "content": [{"type": "text", "text": user_text}, *get_image_blocks_for_anthropic()]}],
-    }
-
-    resp = requests.post(
-        ANTHROPIC_URL,
+    r = requests.post(
+        "https://api.openai.com/v1/chat/completions",
         headers={
-            "x-api-key": api_key,
-            "anthropic-version": "2023-06-01",
-            "content-type": "application/json",
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"
         },
         json=payload,
-        timeout=120,
+        timeout=60
     )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Claude error {resp.status_code}: {resp.text[:1000]}")
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
-    data = resp.json()
-    text_parts = [block.get("text", "") for block in data.get("content", []) if block.get("type") == "text"]
-    parsed = safe_json_loads("\n".join(text_parts).strip())
-    if parsed is None:
-        raise RuntimeError("Claude returned non-JSON output.")
-    return parsed
-
-
-def call_perplexity_judge(system_prompt: str, user_text: str):
-    api_key = get_perplexity_key()
-    if not api_key:
-        raise RuntimeError("Missing PERPLEXITY_API_KEY.")
+def call_openai_text(prompt: str) -> str:
+    key = get_secret("OPENAI_API_KEY", "")
+    if not key:
+        raise RuntimeError("Missing OPENAI_API_KEY in Streamlit secrets.")
 
     payload = {
-        "model": st.session_state.perplexity_model,
-        "temperature": 0.2,
-        "messages": [
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": user_text},
-        ],
-    }
-
-    resp = requests.post(
-        PERPLEXITY_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
-        json=payload,
-        timeout=120,
-    )
-    if resp.status_code != 200:
-        raise RuntimeError(f"Perplexity error {resp.status_code}: {resp.text[:1000]}")
-
-    parsed = safe_json_loads(resp.json()["choices"][0]["message"]["content"].strip())
-    if parsed is None:
-        raise RuntimeError("Perplexity returned non-JSON output.")
-    return parsed
-
-# ---------------------------------------------------------
-# Analysis logic
-# ---------------------------------------------------------
-
-def disagreement_score(observer, validator):
-    if not observer or not validator:
-        return 0
-    obs_id = (observer.get("likely_identification") or "").strip().lower()
-    val_id = (validator.get("likely_identification") or "").strip().lower()
-    obs_alt = (observer.get("alternative_identification") or "").strip().lower()
-    val_alt = (validator.get("alternative_identification") or "").strip().lower()
-
-    score = 0
-    if obs_id and val_id and obs_id != val_id:
-        score += 2
-    if obs_id and val_alt and obs_id == val_alt:
-        score -= 1
-    if val_id and obs_alt and val_id == obs_alt:
-        score -= 1
-    try:
-        if int(observer.get("confidence", 0)) <= 2 or int(validator.get("confidence", 0)) <= 2:
-            score += 1
-    except Exception:
-        pass
-    return max(score, 0)
-
-
-def build_free_reply(observer):
-    evidence = observer.get("visible_evidence", [])
-    likely = observer.get("likely_identification", "uncertain")
-    alt = observer.get("alternative_identification", "another possibility")
-    conf = int(observer.get("confidence", 2))
-    next_check = observer.get("next_check", "check another visible feature or retake the image")
-
-    lead = f"I can see {', '.join(evidence[:3])}." if evidence else "I can see a few visible thermal patterns."
-    if conf >= 4:
-        body = f"The best fit is {likely}."
-    elif conf == 3:
-        body = f"The best fit may be {likely}, though {alt} is still plausible."
-    else:
-        body = f"This is still uncertain; {likely} is only a tentative fit."
-    return f"{lead} {body} Next, {next_check}."
-
-
-def analyze_image():
-    if not st.session_state.image_bytes:
-        st.warning("Please upload an image first.")
-        return
-
-    context = specimen_context_block()
-
-    observer = call_openai_json(
-        role_system_prompt("observer"),
-        f"Analyze this thermal image with attention to the user's stated main subject. {context}",
-    )
-    st.session_state.observer_json = observer
-
-    final_reply = ""
-    validator = None
-    judge = None
-
-    if st.session_state.tier == "Free":
-        final_reply = build_free_reply(observer)
-        confidence = observer.get("confidence", 2)
-        next_check = observer.get("next_check", "Retake the image or inspect one more visible feature.")
-    else:
-        validator = call_claude_json(
-            role_system_prompt("validator"),
-            f"Independently validate this thermal image and the main subject interpretation. {context}",
-        )
-        st.session_state.validator_json = validator
-
-        use_judge = disagreement_score(observer, validator) >= 2
-        try:
-            if int(observer.get("confidence", 0)) <= 2 or int(validator.get("confidence", 0)) <= 2:
-                use_judge = True
-        except Exception:
-            pass
-
-        if use_judge:
-            judge = call_perplexity_judge(
-                role_system_prompt("judge"),
-                (
-                    "Compare these two structured analyses of the same image and main subject and produce a cautious user-facing result.\n\n"
-                    f"Image context:\n{context}\n\n"
-                    f"Observer JSON:\n{json.dumps(observer, ensure_ascii=False)}\n\n"
-                    f"Validator JSON:\n{json.dumps(validator, ensure_ascii=False)}"
-                ),
-            )
-            st.session_state.judge_json = judge
-
-        if judge and judge.get("student_reply"):
-            final_reply = judge["student_reply"].strip()
-            confidence = judge.get("confidence", 2)
-            next_check = judge.get("next_check", "Check another visible feature or confirm with direct inspection.")
-        else:
-            confidence = min(int(observer.get("confidence", 2)), int(validator.get("confidence", 2)))
-            next_check = validator.get("next_check") or observer.get("next_check") or "Check another visible feature or retake the image."
-            if disagreement_score(observer, validator) >= 2:
-                final_reply = (
-                    f"I can see useful thermal patterns, but there is still real uncertainty. "
-                    f"One reading leans toward {observer.get('likely_identification', 'one interpretation')}, "
-                    f"while another leans toward {validator.get('likely_identification', 'another interpretation')}. "
-                    f"The safest next step is to {next_check}."
-                )
-            else:
-                final_reply = (
-                    f"I can see {', '.join((validator.get('visible_evidence') or [])[:3]) or 'several visible thermal features'}. "
-                    f"The strongest fit is {validator.get('likely_identification', 'uncertain')}. "
-                    f"Next, {next_check}."
-                )
-
-    st.session_state.final_reply = final_reply
-    st.session_state.display_messages = [{"role": "assistant", "content": final_reply}]
-    st.session_state.analysis_meta = {
-        "tier": st.session_state.tier,
-        "observer_model": st.session_state.openai_model,
-        "validator_model": st.session_state.claude_model if validator else None,
-        "judge_model": st.session_state.perplexity_model if judge else None,
-        "confidence": confidence,
-        "next_check": next_check,
-        "timestamp": datetime.now().isoformat(timespec="seconds"),
-    }
-    st.session_state.session_log.append(
-        {
-            "timestamp": datetime.now().isoformat(timespec="seconds"),
-            "tier": st.session_state.tier,
-            "image_name": st.session_state.image_name,
-            "main_subject": st.session_state.student_name,
-            "result": final_reply,
-            "confidence": confidence,
-            "next_check": next_check,
-        }
-    )
-
-# ---------------------------------------------------------
-# Follow-up chat
-# ---------------------------------------------------------
-
-def followup_system_prompt():
-    return """
-    You are a concise tutor continuing the same thermal-image discussion.
-    Stay consistent with the earlier analysis unless the new message gives a reason to revise it.
-    Be honest about uncertainty.
-    Use 2-4 short sentences.
-    """.strip()
-
-
-def send_followup(user_text: str):
-    user_text = user_text.strip()
-    if not user_text:
-        return
-
-    api_key = get_openai_key()
-    if not api_key:
-        raise RuntimeError("Missing OPENAI_API_KEY.")
-
-    prior = st.session_state.get("final_reply", "[no earlier reply stored]")
-    context = specimen_context_block()
-
-    payload = {
-        "model": st.session_state.openai_model,
+        "model": OPENAI_MODEL,
         "temperature": 0.3,
         "messages": [
-            {"role": "system", "content": followup_system_prompt()},
             {
-                "role": "user",
-                "content": (
-                    f"Earlier reply:\n{prior}\n\n"
-                    f"Image context:\n{context}\n\n"
-                    f"User follow-up:\n{user_text}\n\n"
-                    "Keep the answer short, grounded, and practical."
-                ),
+                "role": "system",
+                "content": "You are a helpful education assistant. Be concise, clear, and practical."
             },
-        ],
+            {"role": "user", "content": prompt}
+        ]
     }
 
-    resp = requests.post(
-        OPENAI_URL,
-        headers={"Authorization": f"Bearer {api_key}", "Content-Type": "application/json"},
+    r = requests.post(
+        "https://api.openai.com/v1/chat/completions",
+        headers={
+            "Authorization": f"Bearer {key}",
+            "Content-Type": "application/json"
+        },
         json=payload,
-        timeout=120,
+        timeout=60
     )
-    if resp.status_code != 200:
-        raise RuntimeError(f"OpenAI follow-up error {resp.status_code}: {resp.text[:1000]}")
+    r.raise_for_status()
+    return r.json()["choices"][0]["message"]["content"]
 
-    reply = resp.json()["choices"][0]["message"]["content"].strip()
-    st.session_state.display_messages.append({"role": "user", "content": user_text})
-    st.session_state.display_messages.append({"role": "assistant", "content": reply})
-
-# ---------------------------------------------------------
-# Auth
-# ---------------------------------------------------------
-
-init_state()
-
-if not st.session_state.authenticated:
-    st.markdown(
-        """
-        <div class="main-card" style="max-width:560px; margin:3rem auto; text-align:center;">
-            <div class="soft-label">Login</div>
-            <h2 style="margin-top:0.2rem; margin-bottom:0.2rem;">Welcome to TIAp</h2>
-            <div class="small-note">Thermal Image Analyzer</div>
-            <div class="small-note" style="margin-top:0.7rem;">Enter the app password to continue.</div>
+def render_audio_button(text_to_speak: str):
+    safe_text = html.escape(text_to_speak).replace("\n", " ")
+    st.components.v1.html(
+        f"""
+        <div>
+          <button
+            onclick="window.speechSynthesis.cancel(); window.speechSynthesis.speak(new SpeechSynthesisUtterance('{safe_text}'));"
+            style="
+              background:#1f1f1f;
+              color:white;
+              border:none;
+              padding:0.65rem 1rem;
+              border-radius:8px;
+              cursor:pointer;
+              font-size:14px;
+              font-weight:600;
+            ">
+            Play Audio
+          </button>
         </div>
         """,
-        unsafe_allow_html=True,
+        height=58,
     )
 
-    with st.form("login_form"):
-        entered = st.text_input("Password", type="password", placeholder="Enter password")
-        submitted = st.form_submit_button("Enter", use_container_width=True)
+# =========================================================
+# STYLES
+# =========================================================
 
-    actual = app_password()
-    if submitted:
-        if not actual:
-            st.session_state.login_error = "APP_PASSWORD is missing from secrets."
-        elif entered == actual:
-            st.session_state.authenticated = True
-            st.session_state.login_error = ""
-            st.rerun()
-        else:
-            st.session_state.login_error = "Incorrect password."
+st.set_page_config(page_title="TIA", layout="wide")
 
-    if st.session_state.login_error:
-        st.error(st.session_state.login_error)
-    st.stop()
+st.markdown("""
+<style>
+html, body, [class*="css"] {
+    font-size: 16px;
+    color: #111111;
+}
 
-# ---------------------------------------------------------
-# Main UI
-# ---------------------------------------------------------
+.stApp {
+    background: #F6F7F9;
+}
 
-st.markdown(
-    """
+.main-card {
+    background: #FFFFFF;
+    border: 1px solid #D0D4DA;
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.pro-card {
+    background: #FAFAFA;
+    border: 1px solid #C9CDD3;
+    border-radius: 10px;
+    padding: 1rem;
+    margin-bottom: 1rem;
+}
+
+.input-box {
+    background: #EEF4FB;
+    border: 1px solid #C9D8EA;
+    border-radius: 10px;
+    padding: 1rem;
+    color: #111111;
+}
+
+.output-box {
+    background: #FFF5F0;
+    border: 1px solid #F0CBBE;
+    border-radius: 10px;
+    padding: 1rem;
+    color: #111111;
+}
+
+.small-note {
+    color: #4D5661;
+    font-size: 0.95rem;
+}
+
+.brand-line {
+    font-size: 1.02rem;
+    color: #222222;
+    margin-top: -0.2rem;
+}
+
+.brand-link {
+    color: #2B5C88;
+    font-size: 0.95rem;
+    margin-top: 0.2rem;
+}
+
+.section-label {
+    font-size: 1.05rem;
+    font-weight: 700;
+    margin-bottom: 0.6rem;
+}
+
+.box-label {
+    font-size: 0.92rem;
+    font-weight: 700;
+    margin-bottom: 0.45rem;
+    text-transform: uppercase;
+    letter-spacing: 0.03em;
+}
+
+div.stButton > button {
+    border-radius: 8px;
+    min-height: 44px;
+    font-weight: 600;
+    border: 1px solid #BFC6CF;
+}
+
+div.stButton > button:disabled {
+    background: #E7EAEE !important;
+    color: #666666 !important;
+    border: 1px solid #C7CCD3 !important;
+}
+
+div[data-baseweb="input"] > div,
+div[data-baseweb="select"] > div,
+textarea, input {
+    border-radius: 8px !important;
+}
+
+hr {
+    border: none;
+    border-top: 1px solid #D8DCE2;
+    margin: 1rem 0;
+}
+</style>
+""", unsafe_allow_html=True)
+
+# =========================================================
+# LOGIN
+# =========================================================
+
+def render_login():
+    left, center, right = st.columns([1, 1.2, 1])
+
+    with center:
+        st.markdown("""
+        <div class="main-card" style="margin-top:3rem;">
+            <div class="section-label">1. Sign In</div>
+            <h1 style="margin-bottom:0.15rem;">TIA</h1>
+            <div class="brand-line"><strong>T</strong>hermal <strong>I</strong>mage <strong>A</strong>nalysis by We are dougalien</div>
+            <div class="brand-link">www.dougalien.com</div>
+            <p class="small-note" style="margin-top:0.9rem;">
+                Enter the app password to continue.
+            </p>
+        </div>
+        """, unsafe_allow_html=True)
+
+        with st.form("login_form", clear_on_submit=False):
+            entered = st.text_input("Password", type="password", placeholder="Enter password")
+            submitted = st.form_submit_button("Enter", use_container_width=True)
+
+        if submitted:
+            actual = get_app_password()
+            if not actual:
+                st.session_state.login_error = "APP_PASSWORD is missing from Streamlit secrets."
+            elif entered == actual:
+                st.session_state.authenticated = True
+                st.session_state.login_error = ""
+                st.rerun()
+            else:
+                st.session_state.login_error = "Incorrect password."
+
+        if st.session_state.login_error:
+            st.error(st.session_state.login_error)
+
+# =========================================================
+# HEADER
+# =========================================================
+
+def render_header():
+    st.markdown("""
     <div class="main-card">
-        <h1 style="margin-bottom:0.2rem;">🌡️ TIAp</h1>
-        <div class="small-note">Thermal Image Analyzer</div>
-        <div class="small-note" style="margin-top:0.55rem;">IR colors are relative and may shift with device settings, palette choice, and scene conditions.</div>
+        <h1 style="margin-bottom:0.15rem;">TIA</h1>
+        <div class="brand-line"><strong>T</strong>hermal <strong>I</strong>mage <strong>A</strong>nalysis by We are dougalien</div>
+        <div class="brand-link">www.dougalien.com</div>
     </div>
-    """,
-    unsafe_allow_html=True,
-)
+    """, unsafe_allow_html=True)
 
-with st.sidebar:
-    st.markdown("## TIAp")
-    st.session_state.tier = st.radio("Tier", ["Free", "Pro"], index=0 if st.session_state.tier == "Free" else 1)
+# =========================================================
+# PRO FEATURES
+# =========================================================
 
-    if st.button("Sign out", use_container_width=True):
-        sign_out()
-        st.rerun()
+def render_pro_features():
+    st.markdown('<div class="section-label">2. Pro Features</div>', unsafe_allow_html=True)
 
-    st.markdown("---")
-    st.caption("Free: OpenAI only")
-    st.caption("Pro: OpenAI + Claude + Perplexity, zoom, follow-up chat, details, session download")
+    st.markdown("""
+    <div class="pro-card">
+        <div class="small-note">
+            These features are visible by design and remain locked until enabled in a future paid version.
+        </div>
+    </div>
+    """, unsafe_allow_html=True)
 
-    if st.session_state.tier == "Pro":
-        st.markdown("### Pro Controls")
-        st.session_state.include_auto_zoom = st.checkbox("Auto zoom center", value=st.session_state.include_auto_zoom)
-        st.session_state.show_zoom_preview = st.checkbox("Show zoom preview", value=st.session_state.show_zoom_preview)
-        st.session_state.zoom_fraction = st.slider("Zoom fraction", 0.2, 1.0, st.session_state.zoom_fraction, 0.1)
+    c1, c2, c3 = st.columns(3)
 
-missing = []
-if not get_openai_key():
-    missing.append("OpenAI")
-if st.session_state.tier == "Pro" and not get_claude_key():
-    missing.append("Claude")
-if st.session_state.tier == "Pro" and not get_perplexity_key():
-    missing.append("Perplexity")
-if missing:
-    st.warning("Missing API keys: " + ", ".join(missing))
+    with c1:
+        st.button("Use multiple APIs", disabled=True, use_container_width=True)
+        st.button("Upload lesson materials", disabled=True, use_container_width=True)
 
-left, right = st.columns([1.05, 1])
+    with c2:
+        st.button("Create lesson plan", disabled=True, use_container_width=True)
+        st.button("Save results", disabled=True, use_container_width=True)
 
-with left:
-    st.markdown('<div class="main-card">', unsafe_allow_html=True)
-    uploaded = st.file_uploader("Upload a thermal image", type=["png", "jpg", "jpeg", "webp"])
-    if uploaded is not None:
-        update_uploaded_image(uploaded)
+    with c3:
+        st.button("View analytics", disabled=True, use_container_width=True)
+        st.button("See roadmap", disabled=True, use_container_width=True)
 
-    if st.session_state.image_bytes:
-        base_img = pil_from_session_image()
-        st.image(base_img, caption=st.session_state.image_name or "Uploaded thermal image", use_container_width=True)
+# =========================================================
+# USER
+# =========================================================
 
-        if st.session_state.tier == "Pro" and st.session_state.show_zoom_preview:
+def render_user_section():
+    st.markdown('<div class="section-label">3. User</div>', unsafe_allow_html=True)
+
+    c1, c2 = st.columns(2)
+
+    with c1:
+        st.session_state.username = st.text_input(
+            "User name (optional)",
+            value=st.session_state.username,
+            placeholder="Enter a user name or leave blank"
+        )
+
+    with c2:
+        st.session_state.specimen_label = st.text_input(
+            "Image label or ID (optional)",
+            value=st.session_state.specimen_label,
+            placeholder="Enter image label or ID"
+        )
+
+    c3, c4 = st.columns(2)
+
+    with c3:
+        st.session_state.student_observations = st.text_input(
+            "User observations (optional)",
+            value=st.session_state.student_observations,
+            placeholder="Brief observations"
+        )
+
+    with c4:
+        st.session_state.student_best_answer = st.text_input(
+            "Current guess (optional)",
+            value=st.session_state.student_best_answer,
+            placeholder="Current guess"
+        )
+
+# =========================================================
+# UPLOAD
+# =========================================================
+
+def render_upload_section():
+    st.markdown('<div class="section-label">4. Upload Image</div>', unsafe_allow_html=True)
+
+    uploaded_file = st.file_uploader(
+        "Upload thermal image",
+        type=["png", "jpg", "jpeg"],
+        help="Upload a clear thermal or infrared image for analysis."
+    )
+
+    if uploaded_file is not None:
+        st.session_state.uploaded_name = uploaded_file.name
+        raw, mime, data_uri = file_to_data_uri(uploaded_file)
+        st.session_state.image_bytes = raw
+        st.session_state.image_mime = mime
+        st.session_state.image_data_uri = data_uri
+
+        image = Image.open(uploaded_file)
+        st.image(image, caption="Uploaded thermal image", use_container_width=True)
+
+        if st.session_state.show_zoom_preview:
             try:
-                zoom_img = center_crop(base_img, st.session_state.zoom_fraction)
-                st.image(zoom_img, caption="Zoomed center preview", use_container_width=True)
+                crop = center_crop(image, st.session_state.zoom_fraction)
+                st.image(crop, caption="Center crop preview", use_container_width=True)
             except Exception:
                 pass
-    st.markdown('</div>', unsafe_allow_html=True)
 
-with right:
-    st.markdown('<div class="main-card">', unsafe_allow_html=True)
-    st.text_input(
-        "Main subject (object or scene)",
-        key="student_name",
-        placeholder="e.g. stream reach, breaker panel, north wall, person, device",
-    )
-    st.text_input("Short label / ID", key="specimen_label", placeholder="e.g. Office north wall – Mar 2026")
-    st.text_area("Optional notes", key="context_notes", height=80)
-    st.text_area("What do you notice?", key="student_observations", height=70)
-    st.text_input("Your current guess", key="student_best_answer", placeholder="e.g. cold air leak, moisture, overheating")
-    st.text_input("Known diagnosis / ground truth (optional)", key="known_name")
-    st.markdown('</div>', unsafe_allow_html=True)
+    return uploaded_file
 
-col_a, col_b = st.columns([1, 1])
-with col_a:
-    if st.button("📸 Analyze image", use_container_width=True):
+# =========================================================
+# ANALYZE
+# =========================================================
+
+def render_analyze_section(uploaded_file):
+    st.markdown('<div class="section-label">5. Analyze</div>', unsafe_allow_html=True)
+
+    if uploaded_file is None:
+        st.button("Analyze", disabled=True, use_container_width=False)
+        return
+
+    if st.button("Analyze", use_container_width=False):
         try:
-            analyze_image()
-        except Exception as e:
-            st.error(str(e))
-with col_b:
-    if st.button("Clear current result", use_container_width=True):
-        reset_analysis_state()
-        st.rerun()
+            raw = call_openai_json(build_observer_prompt())
+            obs = parse_observation(raw)
 
-if st.session_state.final_reply:
-    meta = st.session_state.analysis_meta or {}
-    st.markdown(
-        f"""
-        <div class="main-card">
-            <div class="soft-label">Answer</div>
-            <div class="answer-box">{st.session_state.final_reply}</div>
-            <div class="next-box" style="margin-top:0.8rem;"><strong>Next check:</strong> {meta.get('next_check', 'Check another visible feature or confirm with direct inspection.')}</div>
-        </div>
-        """,
-        unsafe_allow_html=True,
+            if not obs:
+                st.error("The model returned an unreadable response.")
+            else:
+                st.session_state.obs = obs
+                st.session_state.lesson_plan = None
+
+        except requests.RequestException as e:
+            st.error(f"Request error: {e}")
+        except Exception as e:
+            st.error(f"Unexpected error: {e}")
+
+# =========================================================
+# RESULTS
+# =========================================================
+
+def render_result_section():
+    if not st.session_state.obs:
+        return
+
+    obs = st.session_state.obs
+    evidence = obs.get("visible_evidence", [])
+    evidence_text = ", ".join([e for e in evidence if e]) if evidence else "No clear visible evidence returned."
+
+    st.markdown('<div class="section-label">6. Result</div>', unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="input-box">
+        <div class="box-label">{display_name()}</div>
+        <div>Thermal image ready for analysis.</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+    st.markdown(f"""
+    <div class="output-box">
+        <div class="box-label">TIA</div>
+        <div><strong>Visible evidence:</strong> {evidence_text}</div>
+        <div style="margin-top:0.45rem;"><strong>Likely identification:</strong> {obs.get('likely_identification', '')}</div>
+        <div style="margin-top:0.45rem;"><strong>Alternative identification:</strong> {obs.get('alternative_identification', '')}</div>
+        <div style="margin-top:0.45rem;"><strong>Confidence:</strong> {obs.get('confidence', '')} out of 5</div>
+        <div style="margin-top:0.7rem;"><strong>Reasoning:</strong> {obs.get('reasoning', '')}</div>
+        <div style="margin-top:0.7rem;"><strong>Next step:</strong> {obs.get('next', '')}</div>
+    </div>
+    """, unsafe_allow_html=True)
+
+# =========================================================
+# AUDIO
+# =========================================================
+
+def render_audio_section():
+    if not st.session_state.obs:
+        return
+
+    obs = st.session_state.obs
+    evidence = obs.get("visible_evidence", [])
+    evidence_text = ", ".join([e for e in evidence if e]) if evidence else "a few visible thermal features"
+
+    st.markdown('<div class="section-label">7. Optional Audio</div>', unsafe_allow_html=True)
+
+    speech_text = (
+        f"Visible evidence: {evidence_text}. "
+        f"Likely identification: {obs.get('likely_identification', '')}. "
+        f"Alternative identification: {obs.get('alternative_identification', '')}. "
+        f"Confidence: {obs.get('confidence', '')} out of 5. "
+        f"Reasoning: {obs.get('reasoning', '')}. "
+        f"Next step: {obs.get('next', '')}."
     )
-    st.metric("Confidence", f"{meta.get('confidence', 2)}/5")
-    st.caption("Use thermal images as screening tools. Confirm important building, electrical, mechanical, or medical concerns with direct inspection or qualified help.")
+    render_audio_button(speech_text)
 
-if st.session_state.tier == "Pro" and st.session_state.final_reply:
-    st.markdown("---")
-    st.subheader("Follow-up chat")
-    followup = st.text_input("Ask about this same image", placeholder="e.g. Is this more like moisture or an air leak?")
-    if st.button("Send follow-up") and followup.strip():
-        try:
-            send_followup(followup)
-        except Exception as e:
-            st.error(str(e))
+# =========================================================
+# DEVELOPER TOOLS
+# =========================================================
 
-    for msg in st.session_state.display_messages:
-        if msg["role"] == "user":
-            st.markdown(f"<div class='chat-user'><strong>You:</strong> {msg['content']}</div>", unsafe_allow_html=True)
-        else:
-            st.markdown(f"<div class='chat-ai'><strong>TIAp:</strong> {msg['content']}</div>", unsafe_allow_html=True)
+def render_dev_tools():
+    st.markdown('<div class="section-label">8. Developer Tools</div>', unsafe_allow_html=True)
 
-    with st.expander("Model details"):
-        st.json(st.session_state.observer_json or {})
-        if st.session_state.validator_json:
-            st.json(st.session_state.validator_json)
-        if st.session_state.judge_json:
-            st.json(st.session_state.judge_json)
+    with st.expander("Open developer tools", expanded=False):
+        st.write("These tools are for testing only and are not part of the standard user view.")
 
-    if st.session_state.session_log:
-        st.download_button(
-            "Download session",
-            data=json.dumps(st.session_state.session_log, indent=2),
-            file_name="tiap_session.json",
-            mime="application/json",
-        )
+        if not st.session_state.obs:
+            st.write("Analyze an image first to test lesson plan and save tools.")
+            return
+
+        obs = st.session_state.obs
+        c1, c2 = st.columns(2)
+
+        with c1:
+            if st.button("Generate lesson plan now", use_container_width=True):
+                prompt = LESSON_PROMPT.format(
+                    label=st.session_state.specimen_label.strip() or "[not provided]",
+                    evidence=", ".join(obs.get("visible_evidence", [])),
+                    likely=obs.get("likely_identification", ""),
+                    alternative=obs.get("alternative_identification", ""),
+                    reasoning=obs.get("reasoning", "")
+                )
+                try:
+                    st.session_state.lesson_plan = call_openai_text(prompt)
+                except requests.RequestException as e:
+                    st.error(f"Request error: {e}")
+                except Exception as e:
+                    st.error(f"Unexpected error: {e}")
+
+        with c2:
+            st.download_button(
+                "Download current result as JSON",
+                data=json.dumps(obs, indent=2),
+                file_name="tia_result.json",
+                use_container_width=True
+            )
+
+        if st.session_state.lesson_plan:
+            st.markdown(f"""
+            <div class="output-box">
+                <div class="box-label">TIA</div>
+                <div><strong>Lesson plan</strong></div>
+                <div style="margin-top:0.7rem;">{st.session_state.lesson_plan}</div>
+            </div>
+            """, unsafe_allow_html=True)
+
+# =========================================================
+# MAIN
+# =========================================================
+
+if not st.session_state.authenticated:
+    render_login()
+    st.stop()
+
+render_header()
+render_pro_features()
+render_user_section()
+uploaded_file = render_upload_section()
+render_analyze_section(uploaded_file)
+render_result_section()
+render_audio_section()
+render_dev_tools()
